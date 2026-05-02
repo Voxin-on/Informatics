@@ -95,6 +95,14 @@ class ShopApp:
         
         tk.Button(sale_tab, text="ЗАВЕРШИТЬ ПОКУПКУ", command=self.finish_sale, bg="#ffcc80", font=("Arial", 10, "bold")).pack(pady=10)
 
+        tk.Label(sale_tab, text="Выберите кассира:", font=("Arial", 10, "bold")).pack(pady=5)
+
+        self.employees_map = self.get_employees_map()
+        self.cashier_cb = ttk.Combobox(sale_tab, values=list(self.employees_map.keys()), state="readonly", width=30)
+        self.cashier_cb.pack(pady=5)
+        if self.employees_map:
+            self.cashier_cb.current(0)
+
         # Отчёты
         report_tab = ttk.Frame(tabs)
         tabs.add(report_tab, text="Отчеты")
@@ -155,6 +163,32 @@ class ShopApp:
 
         tabs.pack(expand=1, fill="both")
 
+        # сотрудники
+        empl_tab = ttk.Frame(tabs)
+        tabs.add(empl_tab, text="Сотрудники")
+
+        tk.Label(empl_tab, text="Имя:", font=("Arial", 10)).pack(pady=5)
+        self.emp_name = tk.Entry(empl_tab, width=30)
+        self.emp_name.pack()
+
+        tk.Label(empl_tab, text="Фамилия:", font=("Arial", 10)).pack(pady=5)
+        self.emp_surname = tk.Entry(empl_tab, width=30)
+        self.emp_surname.pack()
+
+        tk.Label(empl_tab, text="Должность:", font=("Arial", 10)).pack(pady=5)
+        
+        self.cursor.execute("SELECT id, name FROM jobs_titles")
+        jobs = self.cursor.fetchall()
+        self.job_map = {j[1]: j[0] for j in jobs}
+        
+        self.emp_job_cb = ttk.Combobox(empl_tab, values=list(self.job_map.keys()), width=28)
+        self.emp_job_cb.pack()
+
+        tk.Button(empl_tab, text="Добавить сотрудника", command=self.add_employee, bg="#bbdefb", font=("Arial", 10, "bold")).pack(pady=20)
+
+        self.emp_list = tk.Listbox(empl_tab, width=50, height=8)
+        self.emp_list.pack(pady=10)
+        self.refresh_employee_list()
 
     def add_product(self):
         name  = self.new_name.get().strip()
@@ -247,6 +281,55 @@ class ShopApp:
 
             self.write_off_qty.delete(0, tk.END)
 
+    def add_employee(self):
+        name = self.emp_name.get().strip()
+        surname = self.emp_surname.get().strip()
+        job_input = self.emp_job_cb.get().strip()
+
+        if not all([name, surname, job_input]):
+            messagebox.showwarning("Ошибка", "Заполните все данные сотрудника!")
+            return
+
+
+        if job_input in self.job_map:
+            job_id = self.job_map[job_input]
+        else:
+            if not messagebox.askyesno("Новая должность", f"Должности «{job_input}» нет. Создать?"):
+                return
+            
+            self.cursor.execute("INSERT INTO jobs_titles (name) VALUES (?)", (job_input,))
+            self.conn.commit()
+            job_id = self.cursor.lastrowid
+
+            self.job_map[job_input] = job_id
+            self.emp_job_cb["values"] = list(self.job_map.keys())
+
+        self.cursor.execute(
+            "INSERT INTO employees (name, surname, id_job_title) VALUES (?, ?, ?)",
+            (name, surname, job_id)
+        )
+        self.conn.commit()
+        
+        messagebox.showinfo("Успех", f"Сотрудник {name} {surname} добавлен!")
+
+        self.emp_name.delete(0, tk.END)
+        self.emp_surname.delete(0, tk.END)
+        self.emp_job_cb.set('')
+        self.refresh_employee_list()
+
+        self.employees_map = self.get_employees_map()
+        self.cashier_cb["values"] = list(self.employees_map.keys())
+
+    def refresh_employee_list(self):
+        self.emp_list.delete(0, tk.END)
+        self.cursor.execute("""
+            SELECT e.name, e.surname, j.name 
+            FROM employees e 
+            JOIN jobs_titles j ON e.id_job_title = j.id
+        """)
+        for row in self.cursor.fetchall():
+            self.emp_list.insert(tk.END, f"{row[0]} {row[1]} — {row[2]}")
+
     def get_product_names(self):
         self.cursor.execute("SELECT name FROM products")
         return [row[0] for row in self.cursor.fetchall()]
@@ -284,11 +367,26 @@ class ShopApp:
         self.cart.append({'id': p_id, 'name': name, 'qty': qty, 'price': price})
         self.cart_list.insert(tk.END, f"{name} | {qty} шт. | {qty*price} руб.")
 
+    def get_employees_map(self):
+        self.cursor.execute("SELECT id, name, surname FROM employees")
+        return {f"{row[1]} {row[2]}": row[0] for row in self.cursor.fetchall()}
+
     def finish_sale(self):
-        if not self.cart: return
+        if not self.cart: 
+            messagebox.showwarning("Ошибка", "Корзина пуста!")
+            return
+            
+        cashier_name = self.cashier_cb.get()
+        if not cashier_name:
+            messagebox.showwarning("Ошибка", "Выберите кассира!")
+            return
+            
+        cashier_id = self.employees_map[cashier_name]
         
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.cursor.execute("INSERT INTO receipts (created_at, id_cashier) VALUES (?, 1)", (now,))
+        
+        # Используем cashier_id вместо 1
+        self.cursor.execute("INSERT INTO receipts (created_at, id_cashier) VALUES (?, ?)", (now, cashier_id))
         check_id = self.cursor.lastrowid
         
         for item in self.cart:
@@ -298,8 +396,9 @@ class ShopApp:
                                (item['qty'], item['id']))
             
         self.conn.commit()
-        messagebox.showinfo("Успех", f"Чек №{check_id} сохранен!")
-        self.cart = []; self.cart_list.delete(0, tk.END)
+        messagebox.showinfo("Успех", f"Чек №{check_id} оформлен кассиром {cashier_name}!")
+        self.cart = []
+        self.cart_list.delete(0, tk.END)
 
     def show_report(self):
         selected_date = self.cal.get_date().strftime("%Y-%m-%d")
